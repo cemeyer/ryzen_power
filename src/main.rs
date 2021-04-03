@@ -1,5 +1,6 @@
-use nix::ioctl_readwrite;
-use std::{fs::File, os::unix::prelude::*};
+use capsicum::{self, CapRights, Right};
+use nix::{ioctl_readwrite, request_code_readwrite};
+use std::{fs::File, mem::size_of, os::unix::prelude::*};
 use sysctl::{self, CtlValue, Sysctl};
 
 // Thoroughly inspired by https://github.com/ryanriske/ZenStates-Linux/blob/master/zenstates.py
@@ -10,6 +11,8 @@ pub struct cpuctl_msr_args {
     data: u64,
 }
 
+const CPUCTL_RDMSR: std::os::raw::c_ulong =
+    request_code_readwrite!(b'c', 1, size_of::<cpuctl_msr_args>());
 ioctl_readwrite!(read_msr, b'c', 1, cpuctl_msr_args);
 //ioctl_readwrite!(write_msr, b'c', 2, cpuctl_msr_args);
 
@@ -19,8 +22,7 @@ fn open_cpu(i: usize) -> RawFd {
     f.into_raw_fd()
 }
 
-fn dump_stats(cores: usize, threads_per_core: usize) {
-    let mut msr_values = vec![0; cores];
+fn open_cpus(cores: usize, threads_per_core: usize) -> Vec<RawFd> {
     let mut fds: Vec<RawFd> = vec![0; cores];
 
     let mut i = 0;
@@ -28,6 +30,28 @@ fn dump_stats(cores: usize, threads_per_core: usize) {
         fds[core] = open_cpu(i);
         i += threads_per_core;
     }
+
+    fds
+}
+
+/// Enter Capsicum sandbox.  Restrict cpuctl fds to ioctl, and specifically rdmsr.
+fn sandbox(fds: &Vec<RawFd>) {
+    let rights = capsicum::RightsBuilder::new(Right::Ioctl)
+        .finalize()
+        .unwrap();
+    let ioctls = capsicum::IoctlsBuilder::new(CPUCTL_RDMSR).finalize();
+
+    for fd in fds.iter() {
+        rights.limit(fd).unwrap();
+        ioctls.limit(fd).unwrap();
+    }
+
+    capsicum::enter().unwrap();
+}
+
+fn dump_stats(fds: &Vec<RawFd>) {
+    let cores = fds.len();
+    let mut msr_values = vec![0; cores];
 
     for core in 0..cores {
         let mut msr_one = cpuctl_msr_args {
@@ -57,6 +81,7 @@ fn dump_stats(cores: usize, threads_per_core: usize) {
 }
 
 fn main() {
+    // Need to grab sysctls before sandboxing.
     let cores = sysctl::Ctl::new("kern.smp.cores").unwrap().value().unwrap();
     let threads_per_core = sysctl::Ctl::new("kern.smp.threads_per_core")
         .unwrap()
@@ -64,26 +89,35 @@ fn main() {
         .unwrap();
 
     let cores = match cores {
-        CtlValue::Int(x) => x,
+        CtlValue::Int(x) => x as usize,
         _ => panic!(),
     };
     let threads_per_core = match threads_per_core {
-        CtlValue::Int(x) => x,
+        CtlValue::Int(x) => x as usize,
         _ => panic!(),
     };
-
-    dump_stats(cores as usize, threads_per_core as usize);
-
     let cpu_sysctl = "dev.amdtemp.0.core0.sensor0";
     let cputemp = match sysctl::Ctl::new(cpu_sysctl).unwrap().value().unwrap() {
         CtlValue::Temperature(temp) => temp.celsius(),
         _ => panic!(),
     };
-    println!("{}: {:.1}C", cpu_sysctl, cputemp);
     let dimm_sysctl = "dev.jedec_dimm.0.temp";
     let dimmtemp = match sysctl::Ctl::new(dimm_sysctl).unwrap().value().unwrap() {
         CtlValue::Temperature(temp) => temp.celsius(),
         _ => panic!(),
     };
+
+    // Preopen /dev/cpuctlN before sandboxing.
+    let fds: Vec<RawFd> = open_cpus(cores, threads_per_core);
+
+    //
+    // RESTRICT FDS AND ENTER SANDBOX
+    //
+    sandbox(&fds);
+
+    // Read MSRs, compute and display freq/power info.
+    dump_stats(&fds);
+
+    println!("{}: {:.1}C", cpu_sysctl, cputemp);
     println!("{}: {:.1}C", dimm_sysctl, dimmtemp);
 }
