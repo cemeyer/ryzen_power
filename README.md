@@ -1,6 +1,6 @@
-# zen_power_fbsd
+# ryzen_power
 Toy Rust utility to print actual clocks and voltage for AMD Zen CPUs on
-FreeBSD.
+FreeBSD and Linux.
 
 # Example
 
@@ -29,8 +29,8 @@ that sysctl in your version.
 
 ```
 $ sudo pkg install gnu-watch
-$ gnu-watch -n 1.0 sudo zen_power_fbsd
-Every 1.0s: sudo zen_power_fbsd                   n: Sat Apr  3 10:57:03 2021
+$ gnu-watch -n 1.0 sudo ryzen_power
+Every 1.0s: sudo ryzen_power                      n: Sat Apr  3 10:57:03 2021
 4.80 GHz @ 1.40V
 4.80 GHz @ 1.40V
 4.80 GHz @ 1.40V
